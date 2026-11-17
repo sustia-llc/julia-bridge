@@ -1,0 +1,30 @@
+[package]
+name = "julia-bridge"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+description = "Scaffold: embed Julia in Rust with jlrs' multithreaded runtime"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# `multi-rt` starts Julia once and lets any thread spawned from the handle call into it.
+jlrs = { version = "0.24", features = ["multi-rt"] }
+tokio-rayon = { version = "2.1", optional = true }
+
+[features]
+# Enables the `shared` module: one process-wide Julia runtime that tokio tasks send
+# work to. Build with `--features tokio`.
+tokio = ["jlrs/tokio-rt"]
+# Enables the `exec` module: a rayon thread pool whose jobs are awaited from async code.
+exec = ["dep:tokio-rayon"]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[[example]]
+name = "tokio_demo"
+required-features = ["tokio"]
+
+[[example]]
+name = "pipeline"
+required-features = ["tokio", "exec"]

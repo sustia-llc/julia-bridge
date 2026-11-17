@@ -1,0 +1,14 @@
+# Cargo settings for this workspace. They apply to anything built from this directory
+# (tests, examples, benches); a downstream binary crate needs its own copy.
+#
+# NOTE: if the RUSTFLAGS environment variable is set, cargo ignores `build.rustflags`
+# below entirely. Use one or the other, not both.
+#
+# The rpath of Julia's `lib` directory is not set here: `build.rs` emits it from the
+# environment variable `JLRS_JULIA_DIR`.
+
+[build]
+rustflags = [
+  # Recommended by jlrs for embedding: exports symbols so Julia-generated code is fast.
+  "-C", "link-arg=-rdynamic",
+]
