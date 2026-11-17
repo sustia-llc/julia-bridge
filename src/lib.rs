@@ -13,6 +13,8 @@
 
 #[cfg(feature = "exec")]
 pub mod exec;
+#[cfg(feature = "lifecycle")]
+pub mod lifecycle;
 #[cfg(feature = "tokio")]
 pub mod shared;
 

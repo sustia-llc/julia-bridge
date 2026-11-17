@@ -1,6 +1,6 @@
 [package]
 name = "julia-bridge"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.97"
 description = "Scaffold: embed Julia in Rust with jlrs' multithreaded runtime"
@@ -10,16 +10,32 @@ license = "MIT OR Apache-2.0"
 # `multi-rt` starts Julia once and lets any thread spawned from the handle call into it.
 jlrs = { version = "0.24", features = ["multi-rt"] }
 tokio-rayon = { version = "2.1", optional = true }
+tokio = { version = "1", optional = true, default-features = false, features = ["sync"] }
+tokio-util = { version = "0.7", optional = true, default-features = false, features = ["rt"] }
+thiserror = { version = "2", optional = true }
 
 [features]
 # Enables the `shared` module: one process-wide Julia runtime that tokio tasks send
 # work to. Build with `--features tokio`.
-tokio = ["jlrs/tokio-rt"]
+tokio = ["jlrs/tokio-rt", "dep:tokio"]
 # Enables the `exec` module: a rayon thread pool whose jobs are awaited from async code.
 exec = ["dep:tokio-rayon"]
+# Enables the `lifecycle` module: admission, tracking and shutdown of `shared` calls.
+lifecycle = ["tokio", "tokio/rt", "tokio/time", "dep:tokio-util", "dep:thiserror"]
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+criterion = { version = "0.8", default-features = false, features = ["async_tokio", "cargo_bench_support"] }
+
+[[bench]]
+name = "per_call"
+harness = false
+required-features = ["lifecycle"]
+
+[[bench]]
+name = "shutdown"
+harness = false
+required-features = ["lifecycle"]
 
 [[example]]
 name = "tokio_demo"

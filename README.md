@@ -29,6 +29,10 @@ tests/runtime.rs        cargo test
 examples/pipeline.rs    cargo run --features tokio,exec --example pipeline
 tests/shared.rs         cargo test --features tokio
 tests/exec.rs           cargo test --features exec
+src/lifecycle.rs        cancellation token, task tracker and shutdown (feature "lifecycle")
+tests/lifecycle_*.rs    cargo test --features lifecycle
+benches/per_call.rs     cargo bench --features lifecycle --bench per_call
+benches/shutdown.rs     cargo bench --features lifecycle --bench shutdown
 contrib/julia.fish      fish environment
 contrib/julia-env.sh    bash-syntax environment file
 ```
@@ -176,7 +180,7 @@ handles both by switching to jlrs' async runtime:
 - Tests can be ordinary separate `#[tokio::test]` functions (see `tests/shared.rs`).
 
 ```rust
-use julia_bridge::shared::{call_base1, eval_f64, julia};
+use julia_bridge::shared::{call_base1, close_and_wait, eval_f64, julia};
 
 #[tokio::main]
 async fn main() {
@@ -188,6 +192,9 @@ async fn main() {
         .map(|i| tokio::spawn(call_base1("sqrt", f64::from(i))))
         .collect();
     // ... await the tasks
+
+    // Close the handle and wait for the Julia runtime thread before `main` returns.
+    close_and_wait().await.unwrap();
 }
 ```
 
@@ -206,9 +213,11 @@ What to know:
   (`String`, `f64`, `Vec<f64>`) and get plain Rust values back.
 - **`MAX_CONCURRENT_TASKS`** in `src/shared.rs` caps how many Julia tasks are in flight
   at once. Further tasks queue.
-- The shared handle is never dropped, so the Julia runtime thread runs until the process
-  exits. If the process exits while Julia compiles code, it can print
-  `signal 11 (1): Segmentation fault` or die from the signal.
+- Before `main` returns, await `shared::close_and_wait()`. That function closes the
+  shared handle and waits until the Julia runtime thread ends, which is after each
+  accepted call returned. It does not block the tokio thread. If the process exits while Julia
+  compiles code, it can print `signal 11 (1): Segmentation fault` or die from the
+  signal.
 
 ## Rayon: a pool for the Rust-side work
 
@@ -245,6 +254,92 @@ What to know:
   If both are busy at once, size them explicitly (`with_num_threads`, and
   `n_threads` on the jlrs `Builder` in `src/shared.rs`).
 - The `exec` and `tokio` features are independent; enable either or both.
+
+## Lifecycle: cancel, drain, shut down
+
+The `lifecycle` feature adds `julia_bridge::lifecycle::Lifecycle`. It enables the
+`tokio` feature. A `Lifecycle` owns a `CancellationToken` and a `TaskTracker` from
+`tokio-util`, and it sends its calls through the `shared` module. Each call runs in a
+tokio task that the tracker counts until the call returns. If you drop the future of a
+call after its first poll, the call still runs in Julia and stays counted. Calls need a
+tokio runtime, and `shutdown` needs a tokio runtime with the time driver.
+
+```rust
+use std::time::Duration;
+use julia_bridge::lifecycle::{Lifecycle, LifecycleError, Strategy};
+
+let lifecycle = Lifecycle::new(Strategy::Drain);
+let root = lifecycle.call_base1("sqrt", 2.0).await?;
+
+let report = lifecycle.shutdown(Duration::from_secs(30)).await?;
+// report.drained, report.remaining, report.elapsed
+// report.close holds the result of the close step under Strategy::Close.
+
+let late = lifecycle.call_base1("sqrt", 2.0).await;
+assert!(matches!(late, Err(LifecycleError::Cancelled)));
+```
+
+`shutdown` does these steps in order. Steps 1 and 2 run in the first poll of `shutdown`.
+Steps 3 to 5 run in a tokio task, so they also run if you drop the `shutdown` future
+after that poll.
+
+1. It cancels a token. Under `Strategy::Drain`, that is the token of this `Lifecycle`.
+   Under `Strategy::Close`, that is a process-wide root token, the parent of the token
+   of each `Lifecycle`.
+2. It closes the tracker.
+3. It waits for the tracked calls, for `drain_timeout` at most.
+4. It reads the number of tracked calls that remain.
+5. Under `Strategy::Close`, it awaits `shared::close_and_wait()` in a tokio task.
+   That function sets a process-wide closed flag and, if Julia started, calls
+   `close(false)` on the shared Julia handle. Then it waits until the Julia runtime
+   thread ends, which is after each accepted call returned. After it,
+   `shared::eval_f64` and `shared::call_base1` return an error and do not start Julia.
+
+Under `Strategy::Close`, `shutdown` can take longer than `drain_timeout`, because step 5
+waits for the calls that still run. If step 5 fails, `shutdown` still returns
+`Ok(report)`, and `report.close` holds the error. Under `Strategy::Drain`, do the
+`shared::close_and_wait()` step yourself before `main` returns.
+
+The two strategies differ in steps 1 and 5:
+
+| Strategy | Other `Lifecycle` values | Shared Julia handle | Later `shared` calls |
+|---|---|---|---|
+| `Drain` | work | open | work |
+| `Close` | return `Cancelled` | closed | return an error |
+
+`cancellation_token()` returns the token of the `Lifecycle`. If you cancel it from your
+own signal handler, the next call through that `Lifecycle` returns
+`LifecycleError::Cancelled`.
+
+Put each test that shuts a `Close` lifecycle down in its own file under `tests/`.
+
+### Benchmarks
+
+```bash
+cargo bench --features lifecycle --bench per_call
+cargo bench --features lifecycle --bench shutdown
+```
+
+`per_call` measures one `call_base1("sqrt", 2.0)` round trip through `shared` directly
+(`baseline`) and through a `Lifecycle` of each strategy. `shutdown` starts 64 calls of a
+Julia function that sleeps 0.02 s, waits for the first result, and then calls
+`shutdown`. The bench starts one child process for each of its 20 `Close` runs. The
+`Drain` row counts each run that criterion made, warm-up included.
+
+Results of one run on the development machine:
+
+| Case | Per call, criterion estimate |
+|---|---|
+| `baseline` | 6.98 ms |
+| `drain` | 7.01 ms |
+| `close` | 6.82 ms |
+
+| Strategy | Runs | `shutdown` time, min / median / max | Calls not returned |
+|---|---|---|---|
+| `Drain` | 45 | 74.2 / 77.3 / 80.4 ms | 0 |
+| `Close` | 20 | 76.1 / 79.8 / 83.0 ms | 0 |
+
+The `Close` time includes the wait for the Julia runtime thread.
 
 ## Things that will bite
 
